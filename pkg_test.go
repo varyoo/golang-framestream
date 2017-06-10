@@ -20,8 +20,7 @@ func TestEncodeDecode(t *testing.T) {
 	}
 
 	decOpt := &DecoderOptions{
-		ContentType:   FSContentType,
-		Bidirectional: false,
+		ContentType: FSContentType,
 	}
 	dec, err := NewDecoder(b, decOpt)
 	if err != nil {
