@@ -16,10 +16,13 @@
 
 package framestream
 
-import "bufio"
-import "bytes"
-import "encoding/binary"
-import "io"
+import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"github.com/pkg/errors"
+	"io"
+)
 
 type DecoderOptions struct {
 	MaxPayloadSize uint32
@@ -39,8 +42,8 @@ type ControlFrame struct {
 	ContentTypes [][]byte
 }
 
-func NewBiDecoder(rw io.ReadWriter, opt *DecoderOptions) (dec *Decoder, err error) {
-	writer := bufio.NewWriter(rw)
+func NewBidirectionalDecoder(rw io.ReadWriter, opt *DecoderOptions) (dec *Decoder, err error) {
+	dec = newDecoder(rw, opt)
 
 	// Read the ready control frame.
 	cf, err := dec.readControlFrameType(CONTROL_READY)
@@ -55,16 +58,17 @@ func NewBiDecoder(rw io.ReadWriter, opt *DecoderOptions) (dec *Decoder, err erro
 	}
 
 	// Send the accept control frame.
-	scf := ControlFrame{ControlType: CONTROL_ACCEPT, ContentTypes: matched}
-	err = SendControlFrame(writer, &scf)
+	cf = &ControlFrame{ControlType: CONTROL_ACCEPT, ContentTypes: matched}
+	err = writeControlFrame(rw, cf)
 	if err != nil {
+		err = errors.Wrap(err, "send the accept control frame")
 		return
 	}
 
-	return NewDecoder(rw, opt)
+	return dec, startDecoder(dec)
 }
 
-func NewDecoder(r io.Reader, opt *DecoderOptions) (dec *Decoder, err error) {
+func newDecoder(r io.Reader, opt *DecoderOptions) (dec *Decoder) {
 	if opt == nil {
 		opt = &DecoderOptions{}
 	}
@@ -77,20 +81,28 @@ func NewDecoder(r io.Reader, opt *DecoderOptions) (dec *Decoder, err error) {
 		reader: bufio.NewReader(r),
 		writer: nil,
 	}
+	return
+}
+
+func NewDecoder(r io.Reader, opt *DecoderOptions) (*Decoder, error) {
+	dec := newDecoder(r, opt)
+	return dec, startDecoder(dec)
+}
+func startDecoder(dec *Decoder) error {
 
 	// Read the start control frame.
 	cf, err := dec.readControlFrameType(CONTROL_START)
 	if err != nil {
-		return
+		return errors.Wrap(err, "read control start")
 	}
 
 	// Check content type.
 	matched := MatchContentTypes(cf.ContentTypes, [][]byte{dec.opt.ContentType})
 	if len(matched) != 1 {
-		return dec, ErrContentTypeMismatch
+		return ErrContentTypeMismatch
 	}
 
-	return
+	return nil
 }
 
 func ReadBE32(r io.Reader) (val uint32, err error) {
@@ -105,24 +117,30 @@ func (dec *Decoder) readBE32() (val uint32, err error) {
 	return ReadBE32(dec.reader)
 }
 
-func (dec *Decoder) readEscape() (err error) {
-	escape, err := dec.readBE32()
-	if err != nil || escape != 0 {
-		dec.stopped = true
-		return
+func readEscape(r io.Reader) error {
+	escape, err := ReadBE32(r)
+	if err != nil {
+		return err
 	}
 	if escape != 0 {
-		err = ErrDecode
-		return
+		return errors.New("escape != 0")
+	}
+	return nil
+}
+
+func (dec *Decoder) readEscape() (err error) {
+	err = readEscape(dec.reader)
+	if err != nil {
+		dec.stopped = true
 	}
 	return
 }
 
 func (dec *Decoder) readControlFrame() (cf *ControlFrame, err error) {
-	return ReadControlFrame(dec.reader)
+	return readControlFrame(dec.reader)
 }
 
-func ReadControlFrame(reader io.Reader) (cf *ControlFrame, err error) {
+func readControlFrame(reader io.Reader) (cf *ControlFrame, err error) {
 	cf = new(ControlFrame)
 
 	// Read the control frame length.
@@ -207,7 +225,13 @@ func MatchContentTypes(a [][]byte, b [][]byte) (c [][]byte) {
 	return matched
 }
 
-func SendControlFrame(writer *bufio.Writer, cf *ControlFrame) (err error) {
+func writeControlFrameBuf(w *bufio.Writer, cf *ControlFrame) error {
+	if err := writeControlFrame(w, cf); err != nil {
+		return err
+	}
+	return errors.Wrap(w.Flush(), "flush")
+}
+func writeControlFrame(writer io.Writer, cf *ControlFrame) (err error) {
 	totalLen := 4 * 3
 	for _, contentType := range cf.ContentTypes {
 		totalLen += 4 + 4 + len(contentType)
@@ -259,20 +283,27 @@ func SendControlFrame(writer *bufio.Writer, cf *ControlFrame) (err error) {
 		return
 	}
 
-	return writer.Flush()
+	return nil
 }
 
-func (dec *Decoder) readControlFrameType(t uint32) (cf *ControlFrame, err error) {
-	err = dec.readEscape()
+func readControlFrameType(r io.Reader, t uint32) (cf *ControlFrame, err error) {
+	err = readEscape(r)
 	if err != nil {
 		return
 	}
-	cf, err = dec.readControlFrame()
+	cf, err = readControlFrame(r)
 	if err != nil {
 		return
 	}
 	if cf.ControlType != t {
-		return cf, ErrDecode
+		return cf, errors.Errorf("wrong control frame type, got: %d, want: %d", cf.ControlType, t)
+	}
+	return
+}
+func (dec *Decoder) readControlFrameType(t uint32) (cf *ControlFrame, err error) {
+	cf, err = readControlFrameType(dec.reader, t)
+	if err != nil {
+		dec.stopped = true
 	}
 	return
 }

@@ -16,9 +16,12 @@
 
 package framestream
 
-import "bufio"
-import "encoding/binary"
-import "io"
+import (
+	"bufio"
+	"encoding/binary"
+	"github.com/pkg/errors"
+	"io"
+)
 
 type EncoderOptions struct {
 	ContentType []byte
@@ -30,21 +33,23 @@ type Encoder struct {
 	buf    []byte
 }
 
-func NewBiEncoder(rw io.ReadWriter, opt *EncoderOptions) (enc *Encoder, err error) {
-	writer := bufio.NewWriter(rw)
+func NewBidirectionalEncoder(rw io.ReadWriter, opt *EncoderOptions) (enc *Encoder, err error) {
+	enc = newEncoder(rw, opt)
 
 	// Write the ready control frame.
 	cf := &ControlFrame{ControlType: CONTROL_READY}
 	if opt.ContentType != nil {
-		cf.ContentTypes = [][]byte{enc.opt.ContentType}
+		cf.ContentTypes = [][]byte{opt.ContentType}
 	}
-	if err = SendControlFrame(writer, cf); err != nil {
+	if err = writeControlFrameBuf(enc.writer, cf); err != nil {
+		err = errors.Wrap(err, "write the ready control frame")
 		return
 	}
 
-	// Wait for the accept frame.
-	cf, err = ReadControlFrame(rw)
+	// Wait for the accept control frame.
+	cf, err = readControlFrameType(rw, CONTROL_ACCEPT)
 	if err != nil {
+		err = errors.Wrap(err, "wait accept control frame")
 		return
 	}
 
@@ -54,10 +59,15 @@ func NewBiEncoder(rw io.ReadWriter, opt *EncoderOptions) (enc *Encoder, err erro
 		return enc, ErrContentTypeMismatch
 	}
 
-	return NewEncoder(rw, opt)
+	return enc, startEncoder(enc)
 }
 
-func NewEncoder(w io.Writer, opt *EncoderOptions) (enc *Encoder, err error) {
+// Write the start control frame.
+func startEncoder(enc *Encoder) error {
+	return errors.Wrap(enc.writeControlStart(),
+		"write the start control frame")
+}
+func newEncoder(w io.Writer, opt *EncoderOptions) (enc *Encoder) {
 	if opt == nil {
 		opt = &EncoderOptions{}
 	}
@@ -65,14 +75,13 @@ func NewEncoder(w io.Writer, opt *EncoderOptions) (enc *Encoder, err error) {
 		writer: bufio.NewWriter(w),
 		opt:    *opt,
 	}
+	return enc
+}
 
-	// Write the start control frame.
-	err = enc.writeControlStart()
-	if err != nil {
-		return
-	}
+func NewEncoder(w io.Writer, opt *EncoderOptions) (*Encoder, error) {
+	enc := newEncoder(w, opt)
+	return enc, startEncoder(enc)
 
-	return
 }
 
 func (enc *Encoder) Close() error {
@@ -84,12 +93,12 @@ func (enc *Encoder) writeControlStart() (err error) {
 	if enc.opt.ContentType != nil {
 		cf.ContentTypes = [][]byte{enc.opt.ContentType}
 	}
-	return SendControlFrame(enc.writer, &cf)
+	return writeControlFrameBuf(enc.writer, &cf)
 }
 
 func (enc *Encoder) writeControlStop() (err error) {
 	cf := ControlFrame{ControlType: CONTROL_STOP}
-	return SendControlFrame(enc.writer, &cf)
+	return writeControlFrameBuf(enc.writer, &cf)
 }
 
 func (enc *Encoder) Write(frame []byte) (n int, err error) {
